@@ -206,6 +206,11 @@ opt-level = 3
 opt-level = 3
 
 [patch.crates-io]
+# Exercise the three ServerBox-maintained crates together without replacing
+# the rest of the published IronRDP dependency graph.
+ironrdp-client = { path = "crates/ironrdp-client" }
+ironrdp-connector = { path = "crates/ironrdp-connector" }
+ironrdp-tls = { path = "crates/ironrdp-tls" }
 # Keep connector and SSPI on the same Picky release used by ServerBox.
 sspi = { git = "https://github.com/Devolutions/sspi-rs.git", rev = "847304fe35859a8aec401a50033e39df4c7235f4", version = "=0.21.3" }
 # FIXME: We need to catch up with Diplomat upstream again, but this is a significant amount of work.

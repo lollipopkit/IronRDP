@@ -57,6 +57,8 @@ impl fmt::Debug for ExtensionRegistry {
 pub struct Config {
     pub(crate) connector: ironrdp_connector::Config,
     pub(crate) destination: Destination,
+    pub(crate) tcp_destination: Option<Destination>,
+    pub(crate) trusted_cert_sha256: Option<[u8; 32]>,
     pub(crate) transport: Transport,
     pub(crate) kerberos_config: Option<ironrdp_connector::credssp::KerberosConfig>,
     pub(crate) fake_events_interval: Option<Duration>,
@@ -93,6 +95,11 @@ impl Config {
     /// Resolved RDP target (host + port).
     pub fn destination(&self) -> &Destination {
         &self.destination
+    }
+
+    /// Optional TCP endpoint used instead of the logical RDP destination.
+    pub fn tcp_destination(&self) -> Option<&Destination> {
+        self.tcp_destination.as_ref()
     }
 
     /// Selected transport (Direct, Gateway, or RDCleanPath).
@@ -138,6 +145,11 @@ impl fmt::Debug for Config {
         let mut s = f.debug_struct("Config");
         s.field("connector", &self.connector);
         s.field("destination", &self.destination);
+        s.field("tcp_destination", &self.tcp_destination);
+        s.field(
+            "trusted_cert_sha256",
+            &self.trusted_cert_sha256.as_ref().map(|_| "[redacted]"),
+        );
         s.field("transport", &self.transport);
         s.field("kerberos_config", &self.kerberos_config);
         s.field("fake_events_interval", &self.fake_events_interval);
@@ -531,6 +543,8 @@ impl fmt::Display for MissingField {
 pub struct ConfigBuilder {
     // Required (no default).
     destination: Option<Destination>,
+    tcp_destination: Option<Destination>,
+    trusted_cert_sha256: Option<[u8; 32]>,
     username: Option<String>,
     password: Option<String>,
     client_build: Option<u32>,
@@ -595,6 +609,22 @@ impl ConfigBuilder {
         self.properties.set_server_port(destination.port);
         self.properties.clear_alternate_full_address();
         self.destination = Some(destination);
+        self
+    }
+
+    /// Set a transport-only endpoint while keeping `destination` as the TLS
+    /// server name and CredSSP target. This is used for SSH local tunnels.
+    #[must_use]
+    pub fn with_tcp_destination(mut self, destination: Destination) -> Self {
+        self.tcp_destination = Some(destination);
+        self
+    }
+
+    /// Allow an otherwise untrusted leaf certificate when its SHA-256 digest
+    /// exactly matches this pin.
+    #[must_use]
+    pub fn with_trusted_cert_sha256(mut self, fingerprint: [u8; 32]) -> Self {
+        self.trusted_cert_sha256 = Some(fingerprint);
         self
     }
 
@@ -1195,6 +1225,8 @@ impl ConfigBuilder {
         Ok(Config {
             connector,
             destination: self.destination.context("server address is required")?,
+            tcp_destination: self.tcp_destination,
+            trusted_cert_sha256: self.trusted_cert_sha256,
             transport,
             kerberos_config,
             fake_events_interval: self.fake_events_interval,

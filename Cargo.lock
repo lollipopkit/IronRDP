@@ -2517,6 +2517,7 @@ dependencies = [
  "ironrdp-svc",
  "ironrdp-tls",
  "ironrdp-tokio",
+ "sha2 0.10.9",
  "smallvec",
  "tokio",
  "tokio-tungstenite",
@@ -2981,6 +2982,7 @@ dependencies = [
 name = "ironrdp-tls"
 version = "0.2.2"
 dependencies = [
+ "rustls-native-certs",
  "tokio",
  "tokio-native-tls",
  "tokio-rustls",

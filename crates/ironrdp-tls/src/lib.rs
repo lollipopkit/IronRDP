@@ -25,7 +25,14 @@ compile_error!(
 
 // The whole public API of this crate.
 #[cfg(any(feature = "stub", feature = "native-tls", feature = "rustls-no-provider"))]
-pub use impl_::{TlsStream, negotiated, upgrade};
+pub use impl_::{TlsStream, negotiated, upgrade, upgrade_with_identity};
+
+/// The leaf certificate and whether platform trust roots accepted it for the
+/// requested server name.
+pub struct TlsServerIdentity {
+    pub certificate: x509_cert::Certificate,
+    pub system_trusted: bool,
+}
 
 /// TLS parameters negotiated during the handshake, to the extent the active
 /// backend exposes them.

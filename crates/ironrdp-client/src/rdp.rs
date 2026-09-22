@@ -23,6 +23,7 @@ use ironrdp_session::{ActiveStageBuilder, ActiveStageOutput, GracefulDisconnectR
 use ironrdp_svc::SvcMessage;
 use ironrdp_tokio::reqwest::ReqwestNetworkClient;
 use ironrdp_tokio::{FramedWrite, single_sequence_step_read, split_tokio_framed};
+use sha2::{Digest as _, Sha256};
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
@@ -63,6 +64,10 @@ pub enum RdpOutputEvent {
         y: u16,
     },
     PointerBitmap(Arc<DecodedPointer>),
+    CertificateRequest {
+        der: Vec<u8>,
+        previous_sha256: Option<[u8; 32]>,
+    },
     Terminated(SessionResult<GracefulDisconnectReason>),
 }
 
@@ -190,7 +195,14 @@ impl RdpClient {
         loop {
             let (connection_result, framed) = match &self.config.transport {
                 Transport::Direct => {
-                    match connect_direct(&self.config, &self.input_event_sender, cliprdr_factory).await {
+                    match connect_direct(
+                        &self.config,
+                        &self.input_event_sender,
+                        &self.output_event_sender,
+                        cliprdr_factory,
+                    )
+                    .await
+                    {
                         Ok(r) => r,
                         Err(e) => {
                             let _ = self
@@ -204,7 +216,15 @@ impl RdpClient {
 
                 #[cfg(feature = "gateway")]
                 Transport::Gateway(gw) => {
-                    match connect_gateway(&self.config, gw, &self.input_event_sender, cliprdr_factory).await {
+                    match connect_gateway(
+                        &self.config,
+                        gw,
+                        &self.input_event_sender,
+                        &self.output_event_sender,
+                        cliprdr_factory,
+                    )
+                    .await
+                    {
                         Ok(r) => r,
                         Err(e) => {
                             let _ = self
@@ -431,9 +451,14 @@ type UpgradedFramed = ironrdp_tokio::TokioFramed<Box<dyn AsyncReadWrite + Unpin 
 async fn connect_direct(
     config: &Config,
     input_sender: &mpsc::UnboundedSender<RdpInputEvent>,
+    output_sender: &mpsc::Sender<RdpOutputEvent>,
     cliprdr_factory: CliprdrFactoryRef<'_>,
 ) -> ConnectorResult<(ConnectionResult, UpgradedFramed)> {
-    let dest = config.destination.to_string();
+    let dest = config
+        .tcp_destination
+        .as_ref()
+        .unwrap_or(&config.destination)
+        .to_string();
     let stream = TcpStream::connect(&dest)
         .await
         .map_err(|e| ironrdp_connector::custom_err!("TCP connect", e))?;
@@ -444,7 +469,7 @@ async fn connect_direct(
 
     let connector = build_connector(config, client_addr, input_sender, cliprdr_factory);
 
-    tls_handshake_and_finalize(framed, connector, config).await
+    tls_handshake_and_finalize(framed, connector, config, output_sender).await
 }
 
 /// RDS gateway TCP → gateway auth → TLS connection.
@@ -453,6 +478,7 @@ async fn connect_gateway(
     config: &Config,
     gw: &crate::config::GatewayConfig,
     input_sender: &mpsc::UnboundedSender<RdpInputEvent>,
+    output_sender: &mpsc::Sender<RdpOutputEvent>,
     cliprdr_factory: CliprdrFactoryRef<'_>,
 ) -> ConnectorResult<(ConnectionResult, UpgradedFramed)> {
     use ironrdp_mstsgu::GwConnectTarget;
@@ -474,7 +500,7 @@ async fn connect_gateway(
 
     let connector = build_connector(config, client_addr, input_sender, cliprdr_factory);
 
-    tls_handshake_and_finalize(framed, connector, config).await
+    tls_handshake_and_finalize(framed, connector, config, output_sender).await
 }
 
 /// RDCleanPath WebSocket → RDCleanPath handshake connection.
@@ -536,6 +562,7 @@ async fn tls_handshake_and_finalize<S>(
     mut framed: ironrdp_tokio::TokioFramed<S>,
     mut connector: ironrdp_connector::ClientConnector,
     config: &Config,
+    output_sender: &mpsc::Sender<RdpOutputEvent>,
 ) -> ConnectorResult<(ConnectionResult, UpgradedFramed)>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
@@ -546,9 +573,29 @@ where
 
     let (initial_stream, leftover_bytes) = framed.into_inner();
 
-    let (tls_stream, tls_cert) = ironrdp_tls::upgrade(initial_stream, config.destination.name())
+    let (tls_stream, tls_identity) = ironrdp_tls::upgrade_with_identity(initial_stream, config.destination.name())
         .await
         .map_err(|e| ironrdp_connector::custom_err!("TLS upgrade", e))?;
+    let tls_cert = tls_identity.certificate;
+
+    if !tls_identity.system_trusted {
+        use x509_cert::der::Encode as _;
+
+        let der = tls_cert
+            .to_der()
+            .map_err(|e| ironrdp_connector::custom_err!("server cert encode", e))?;
+        let fingerprint: [u8; 32] = Sha256::digest(&der).into();
+        if config.trusted_cert_sha256 != Some(fingerprint) {
+            output_sender
+                .send(RdpOutputEvent::CertificateRequest {
+                    der,
+                    previous_sha256: config.trusted_cert_sha256,
+                })
+                .await
+                .map_err(|e| ironrdp_connector::custom_err!("certificate output event", e))?;
+            return Err(ironrdp_connector::general_err!("RDP certificate requires approval"));
+        }
+    }
 
     let upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
 

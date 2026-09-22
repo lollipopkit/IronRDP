@@ -29,11 +29,22 @@ impl<S> AsyncWrite for TlsStream<S> {
     }
 }
 
-pub async fn upgrade<S>(stream: S, server_name: &str) -> io::Result<(TlsStream<S>, Vec<u8>)>
+pub async fn upgrade<S>(stream: S, server_name: &str) -> io::Result<(TlsStream<S>, x509_cert::Certificate)>
 where
     S: Unpin + AsyncRead + AsyncWrite,
 {
     // Do nothing and fail
+    let _ = (stream, server_name);
+    Err(io::Error::other("no TLS backend enabled for this build"))
+}
+
+pub async fn upgrade_with_identity<S>(
+    stream: S,
+    server_name: &str,
+) -> io::Result<(TlsStream<S>, crate::TlsServerIdentity)>
+where
+    S: Unpin + AsyncRead + AsyncWrite,
+{
     let _ = (stream, server_name);
     Err(io::Error::other("no TLS backend enabled for this build"))
 }

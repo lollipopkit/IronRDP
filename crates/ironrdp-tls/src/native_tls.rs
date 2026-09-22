@@ -8,6 +8,17 @@ pub async fn upgrade<S>(stream: S, server_name: &str) -> io::Result<(TlsStream<S
 where
     S: Unpin + AsyncRead + AsyncWrite,
 {
+    let (stream, identity) = upgrade_with_identity(stream, server_name).await?;
+    Ok((stream, identity.certificate))
+}
+
+pub async fn upgrade_with_identity<S>(
+    stream: S,
+    server_name: &str,
+) -> io::Result<(TlsStream<S>, crate::TlsServerIdentity)>
+where
+    S: Unpin + AsyncRead + AsyncWrite,
+{
     let mut tls_stream = {
         let connector = tokio_native_tls::native_tls::TlsConnector::builder()
             .danger_accept_invalid_certs(true)
@@ -34,7 +45,13 @@ where
         x509_cert::Certificate::from_der(&cert).map_err(io::Error::other)?
     };
 
-    Ok((tls_stream, tls_cert))
+    Ok((
+        tls_stream,
+        crate::TlsServerIdentity {
+            certificate: tls_cert,
+            system_trusted: false,
+        },
+    ))
 }
 
 /// The `native-tls` backend does not expose the negotiated version or cipher.

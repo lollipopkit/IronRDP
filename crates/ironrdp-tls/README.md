@@ -4,7 +4,7 @@ TLS boilerplate common with most IronRDP clients.
 
 This crate exposes features for selecting the TLS backend:
 
-- `rustls`: use the rustls crate (with the default aws-lc-rs crypto provider).
+- `rustls`: use the rustls crate with the ring crypto provider.
 - `native-tls`: use the native-tls crate.
 - `stub`: use a stubbed backend which fail at runtime when used.
 
@@ -15,9 +15,9 @@ For this reason, no feature is enabled by default.
 When the rustls backend is used, its crypto provider is selectable so downstream
 crates are not forced onto a specific one:
 
-- `rustls` or `rustls-aws-lc-rs`: the aws-lc-rs provider. `rustls` is an alias for
-  `rustls-aws-lc-rs`, so the default backend is unchanged.
-- `rustls-ring`: the ring provider.
+- `rustls` or `rustls-ring`: the ring provider. `rustls` is an alias for
+  `rustls-ring`.
+- `rustls-aws-lc-rs`: the aws-lc-rs provider.
 - `rustls-no-provider`: no provider is bundled. The downstream must install a rustls
   `CryptoProvider` as the process default before opening a connection, otherwise
   building the client configuration panics. Use this to plug in a custom or pure-Rust
@@ -68,6 +68,15 @@ ironrdp-tls = { version = "x.y.z", default-features = false }
 (This is worse when the crate is exposing other default features which are typically not disabled by default.)
 
 The stubbed backend is provided as an easy way to make the code compiles with minimal dependencies if required.
+
+## Certificate trust
+
+The rustls backend records whether the peer certificate was accepted by the
+platform trust store. If the platform provides no native roots, the TLS
+handshake can still complete, but `TlsServerIdentity.system_trusted` is false.
+Handshake signatures remain verified. Clients using `upgrade_with_identity`
+must check this value and obtain an explicit trust decision, such as a verified
+certificate fingerprint, before continuing the RDP connection.
 
 This crate is part of the [IronRDP] project.
 

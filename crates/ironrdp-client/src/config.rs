@@ -58,6 +58,7 @@ pub struct Config {
     pub(crate) connector: ironrdp_connector::Config,
     pub(crate) destination: Destination,
     pub(crate) tcp_destination: Option<Destination>,
+    pub(crate) tcp_preamble: Option<Vec<u8>>,
     pub(crate) trusted_cert_sha256: Option<[u8; 32]>,
     pub(crate) transport: Transport,
     pub(crate) kerberos_config: Option<ironrdp_connector::credssp::KerberosConfig>,
@@ -146,6 +147,7 @@ impl fmt::Debug for Config {
         s.field("connector", &self.connector);
         s.field("destination", &self.destination);
         s.field("tcp_destination", &self.tcp_destination);
+        s.field("tcp_preamble", &self.tcp_preamble.as_ref().map(|_| "[redacted]"));
         s.field(
             "trusted_cert_sha256",
             &self.trusted_cert_sha256.as_ref().map(|_| "[redacted]"),
@@ -544,6 +546,7 @@ pub struct ConfigBuilder {
     // Required (no default).
     destination: Option<Destination>,
     tcp_destination: Option<Destination>,
+    tcp_preamble: Option<Vec<u8>>,
     trusted_cert_sha256: Option<[u8; 32]>,
     username: Option<String>,
     password: Option<String>,
@@ -617,6 +620,15 @@ impl ConfigBuilder {
     #[must_use]
     pub fn with_tcp_destination(mut self, destination: Destination) -> Self {
         self.tcp_destination = Some(destination);
+        self
+    }
+
+    /// Bytes written on the TCP connection before anything RDP, for a local
+    /// tunnel that only carries a connection presenting them. Only on a
+    /// direct connection; never logged.
+    #[must_use]
+    pub fn with_tcp_preamble(mut self, preamble: Vec<u8>) -> Self {
+        self.tcp_preamble = Some(preamble);
         self
     }
 
@@ -1226,6 +1238,7 @@ impl ConfigBuilder {
             connector,
             destination: self.destination.context("server address is required")?,
             tcp_destination: self.tcp_destination,
+            tcp_preamble: self.tcp_preamble,
             trusted_cert_sha256: self.trusted_cert_sha256,
             transport,
             kerberos_config,

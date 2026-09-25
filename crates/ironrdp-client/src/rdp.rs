@@ -459,9 +459,14 @@ async fn connect_direct(
         .as_ref()
         .unwrap_or(&config.destination)
         .to_string();
-    let stream = TcpStream::connect(&dest)
+    let mut stream = TcpStream::connect(&dest)
         .await
         .map_err(|e| ironrdp_connector::custom_err!("TCP connect", e))?;
+    if let Some(preamble) = config.tcp_preamble.as_deref() {
+        tokio::io::AsyncWriteExt::write_all(&mut stream, preamble)
+            .await
+            .map_err(|e| ironrdp_connector::custom_err!("TCP preamble", e))?;
+    }
     let client_addr = stream
         .local_addr()
         .map_err(|e| ironrdp_connector::custom_err!("get socket local address", e))?;

@@ -10,6 +10,10 @@ IronRDP also supports the web browser as a first class target.
 
 See the [iron-remote-desktop](./iron-remote-desktop) for the reusable Web Component, and [iron-svelte-client](./iron-svelte-client) for a demonstration.
 
+## In ServerBox's fork
+
+ServerBox neither builds nor ships these web clients; nothing in this fork runs them. Their locks get `npm audit fix` without major upgrades. TODO: what `npm audit` still reports — vitest and its UI (critical), SvelteKit, typescript-eslint, svelte-check (high) — is development tooling whose fix is a major version (vitest 5, SvelteKit 3, typescript-eslint 8, svelte-check 4) and a migration of these clients with it, left until a client is built from here.
+
 Note that the demonstration client is not intended to be used in production as-is.
 Devolutions is shipping well-integrated, production-ready IronRDP web clients as part of:
 

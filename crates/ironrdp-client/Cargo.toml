@@ -24,6 +24,13 @@ rustls = [
     "ironrdp-mstsgu?/rustls",
 ]
 
+# The rustls backend on the ring crypto provider instead of aws-lc-rs.
+rustls-ring = [
+    "ironrdp-tls/rustls-ring",
+    "tokio-tungstenite/rustls-tls-native-roots",
+    "ironrdp-mstsgu?/rustls-ring",
+]
+
 native-tls = [
     "ironrdp-tls/native-tls",
     "tokio-tungstenite/native-tls",

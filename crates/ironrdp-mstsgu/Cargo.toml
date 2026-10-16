@@ -76,6 +76,7 @@ required-features = ["native-tls", "test-support"]
 [features]
 default = []
 rustls = ["ironrdp-tls/rustls", "tokio-tungstenite/rustls-tls-native-roots"]
+rustls-ring = ["ironrdp-tls/rustls-ring", "tokio-tungstenite/rustls-tls-native-roots"]
 native-tls = ["ironrdp-tls/native-tls", "tokio-tungstenite/native-tls"]
 test-support = ["tokio/io-util"]
 smartcard = [

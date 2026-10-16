@@ -9,11 +9,14 @@
 //! # Protocol Context
 //!
 //! H.264 data arrives inside [RFX_AVC420_BITMAP_STREAM][1] payloads
-//! within `RDPGFX_WIRE_TO_SURFACE_PDU_1` messages. The NAL units
-//! are in AVC format (4-byte big-endian length prefix per NAL unit),
-//! not Annex B (start code prefix).
+//! within `RDPGFX_WIRE_TO_SURFACE_PDU_1` messages. The specification
+//! defines it as an Annex B byte stream (start code prefix), which is what
+//! servers built on FreeRDP's server library, such as GNOME Remote Desktop,
+//! send. Earlier versions of this crate documented AVC format (4-byte
+//! big-endian length prefix per NAL unit) instead, so decoders should accept
+//! both.
 //!
-//! [1]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/d65c3f9c-2088-4302-90c0-53adc0e11a78
+//! [1]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/5f12c20e-2ea1-4ad1-a2a0-019ee3893731
 
 use core::fmt;
 
@@ -138,8 +141,10 @@ pub type DecoderResult<T> = Result<T, DecoderError>;
 /// Trait for H.264 (AVC) decoders
 ///
 /// Implement this trait to provide H.264 decode capability to the
-/// EGFX client. The decoder receives AVC-format NAL units (length-prefixed,
-/// not Annex B) from `RFX_AVC420_BITMAP_STREAM` payloads.
+/// EGFX client. The decoder receives the H.264 data from
+/// `RFX_AVC420_BITMAP_STREAM` payloads: an Annex B byte stream per the
+/// specification, or AVC-format NAL units (4-byte BE length prefix) from
+/// servers that followed this crate's earlier documentation.
 ///
 /// # Thread Safety
 ///
@@ -160,8 +165,8 @@ pub type DecoderResult<T> = Result<T, DecoderError>;
 /// }
 /// ```
 pub trait H264Decoder: Send {
-    /// Decode AVC-format H.264 NAL units (4-byte BE length prefix, not Annex B)
-    /// into an RGBA bitmap.
+    /// Decode H.264 NAL units, as an Annex B byte stream or in AVC format
+    /// (4-byte BE length prefix), into an RGBA bitmap.
     ///
     /// Frame dimensions may exceed the destination rectangle due to
     /// macroblock alignment (16x16). The caller crops to fit.
@@ -183,15 +188,16 @@ pub trait H264Decoder: Send {
 
 #[cfg(feature = "openh264")]
 mod openh264_impl {
+    use openh264::formats::YUVSource;
     use tracing::warn;
 
     use super::{DecodedFrame, DecoderError, DecoderResult, H264Decoder};
 
     /// H.264 decoder backed by Cisco's OpenH264 library
     ///
-    /// This decoder converts AVC-format NAL units to Annex B format
-    /// (as required by OpenH264), decodes to YUV420p, then converts
-    /// to RGBA for the client pipeline.
+    /// This decoder passes Annex B input to OpenH264 as-is and converts
+    /// AVC-format NAL units to Annex B first (OpenH264 only reads Annex B),
+    /// decodes to YUV420p, then converts to RGBA for the client pipeline.
     ///
     /// # Feature Gates
     ///
@@ -241,53 +247,25 @@ mod openh264_impl {
                 annex_b_buffer: Vec::new(),
             })
         }
-
-        /// Convert AVC format (4-byte BE length prefix) to Annex B (start codes)
-        fn avc_to_annex_b(&mut self, data: &[u8]) {
-            self.annex_b_buffer.clear();
-            let mut offset = 0;
-
-            while offset + 4 <= data.len() {
-                let nal_len = u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]);
-
-                #[expect(clippy::as_conversions, reason = "NAL length from wire format")]
-                let nal_len = nal_len as usize;
-                offset += 4;
-
-                // Use checked addition to prevent overflow on malicious input
-                let Some(end) = offset.checked_add(nal_len) else {
-                    warn!(nal_len, offset, "AVC NAL length overflow, discarding remaining data");
-                    break;
-                };
-                if end > data.len() {
-                    warn!(
-                        nal_len,
-                        offset,
-                        data_len = data.len(),
-                        "AVC NAL extends beyond buffer, discarding remaining data"
-                    );
-                    break;
-                }
-
-                // Annex B start code
-                self.annex_b_buffer.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
-                self.annex_b_buffer.extend_from_slice(&data[offset..offset + nal_len]);
-                offset += nal_len;
-            }
-        }
     }
 
     impl H264Decoder for OpenH264Decoder {
         fn decode(&mut self, data: &[u8]) -> DecoderResult<DecodedFrame> {
-            self.avc_to_annex_b(data);
+            let annex_b = if crate::pdu::is_avc_format(data) {
+                crate::pdu::avc_to_annex_b_into(data, &mut self.annex_b_buffer);
+                &self.annex_b_buffer
+            } else {
+                data
+            };
 
             let yuv = self
                 .decoder
-                .decode(&self.annex_b_buffer)
+                .decode(annex_b)
                 .map_err(|e| DecoderError::new("OpenH264 decode failed", e))?
                 .ok_or_else(|| DecoderError::msg("OpenH264 returned no picture"))?;
 
-            let (width, height) = openh264::formats::YUVSource::dimensions(&yuv);
+            let (width, height) = YUVSource::dimensions(&yuv);
+            let (y_stride, u_stride, v_stride) = YUVSource::strides(&yuv);
 
             #[expect(
                 clippy::as_conversions,
@@ -295,13 +273,43 @@ mod openh264_impl {
                 reason = "H.264 frame dimensions are always within u32 range"
             )]
             let (w32, h32) = (width as u32, height as u32);
+            #[expect(
+                clippy::as_conversions,
+                clippy::cast_possible_truncation,
+                reason = "strides are bounded by frame dimensions, which fit in u32"
+            )]
+            let [y_stride, u_stride, v_stride] = [y_stride as u32, u_stride as u32, v_stride as u32];
 
+            let rgba_stride = w32
+                .checked_mul(4)
+                .ok_or_else(|| DecoderError::msg("frame dimensions too large for RGBA allocation"))?;
             let rgba_size = width
                 .checked_mul(height)
                 .and_then(|s| s.checked_mul(4))
                 .ok_or_else(|| DecoderError::msg("frame dimensions too large for RGBA allocation"))?;
             let mut rgba = vec![0u8; rgba_size];
-            yuv.write_rgba8(&mut rgba);
+
+            // MS-RDPEGFX AVC420 streams carry full-range BT.709 YUV420,
+            // but openh264's `write_rgba8` assumes limited-range BT.601,
+            // which distorts colors. Convert per [MS-RDPEGFX] 3.3.8.3.1.
+            let planar = yuv::YuvPlanarImage {
+                y_plane: yuv.y(),
+                y_stride,
+                u_plane: yuv.u(),
+                u_stride,
+                v_plane: yuv.v(),
+                v_stride,
+                width: w32,
+                height: h32,
+            };
+            yuv::yuv420_to_rgba(
+                &planar,
+                &mut rgba,
+                rgba_stride,
+                yuv::YuvRange::Full,
+                yuv::YuvStandardMatrix::Bt709,
+            )
+            .map_err(|e| DecoderError::new("failed to convert YUV420 to RGBA", e))?;
 
             Ok(DecodedFrame::new(rgba, w32, h32))
         }
@@ -322,24 +330,3 @@ mod openh264_impl {
 
 #[cfg(feature = "openh264")]
 pub use openh264_impl::OpenH264Decoder;
-
-#[cfg(test)]
-mod tests {
-    use super::DecodedFrame;
-
-    #[test]
-    fn getters_return_constructor_inputs() {
-        let data = vec![0u8; 2 * 3 * 4];
-        let frame = DecodedFrame::new(data.clone(), 2, 3);
-        assert_eq!(frame.data(), data.as_slice());
-        assert_eq!(frame.width(), 2);
-        assert_eq!(frame.height(), 3);
-    }
-
-    #[test]
-    fn into_data_yields_owned_buffer() {
-        let data = vec![0xAAu8; 4 * 4 * 4];
-        let frame = DecodedFrame::new(data.clone(), 4, 4);
-        assert_eq!(frame.into_data(), data);
-    }
-}

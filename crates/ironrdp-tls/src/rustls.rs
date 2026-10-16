@@ -1,9 +1,10 @@
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
-use tokio_rustls::rustls;
 use tokio_rustls::rustls::pki_types::ServerName;
+
+use crate::{CertificateValidation, CertificateValidationCallback};
 
 pub type TlsStream<S> = tokio_rustls::client::TlsStream<S>;
 
@@ -11,40 +12,22 @@ pub async fn upgrade<S>(stream: S, server_name: &str) -> io::Result<(TlsStream<S
 where
     S: Unpin + AsyncRead + AsyncWrite,
 {
-    let (stream, identity) = upgrade_with_identity(stream, server_name).await?;
-    Ok((stream, identity.certificate))
+    upgrade_with_certificate_validation(stream, server_name, CertificateValidation::default()).await
 }
 
-pub async fn upgrade_with_identity<S>(
+/// Upgrades `stream` to TLS using the explicitly selected certificate-validation policy.
+///
+/// The dangerous policy is intended only for controlled development and test environments.
+pub async fn upgrade_with_certificate_validation<S>(
     stream: S,
     server_name: &str,
-) -> io::Result<(TlsStream<S>, crate::TlsServerIdentity)>
+    certificate_validation: CertificateValidation,
+) -> io::Result<(TlsStream<S>, x509_cert::Certificate)>
 where
     S: Unpin + AsyncRead + AsyncWrite,
 {
-    let verification = Arc::new(Mutex::new(None));
-    let builder = rustls::client::ClientConfig::builder();
-    let verifier = danger::RecordingCertificateVerifier::new(
-        Arc::clone(&verification),
-        builder.crypto_provider().signature_verification_algorithms,
-    )?;
     let mut tls_stream = {
-        let mut config = builder
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(verifier))
-            .with_no_client_auth();
-
-        // This adds support for the SSLKEYLOGFILE env variable (https://wiki.wireshark.org/TLS#using-the-pre-master-secret)
-        config.key_log = Arc::new(rustls::KeyLogFile::new());
-
-        // Disable TLS resumption because it’s not supported by some services such as CredSSP.
-        //
-        // > The CredSSP Protocol does not extend the TLS wire protocol. TLS session resumption is not supported.
-        //
-        // source: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cssp/385a7489-d46b-464c-b224-f7340e308a5c
-        config.resumption = rustls::client::Resumption::disabled();
-
-        let config = Arc::new(config);
+        let config = Arc::new(crate::rustls_client_config(certificate_validation, server_name, None)?);
 
         let domain = ServerName::try_from(server_name.to_owned()).map_err(io::Error::other)?;
 
@@ -66,18 +49,59 @@ where
         x509_cert::Certificate::from_der(cert).map_err(io::Error::other)?
     };
 
-    let system_trusted = verification
-        .lock()
-        .map_err(|_| io::Error::other("certificate verifier state is poisoned"))?
-        .unwrap_or(false);
+    Ok((tls_stream, tls_cert))
+}
 
-    Ok((
-        tls_stream,
-        crate::TlsServerIdentity {
-            certificate: tls_cert,
-            system_trusted,
-        },
-    ))
+/// Upgrades a stream with normal platform-root and server-name validation.
+///
+/// If validation fails, `callback` is invoked synchronously on the handshake thread
+/// with the leaf certificate and validation error. A callback approval accepts that
+/// certificate for this handshake only.
+pub async fn upgrade_with_certificate_validation_callback<S>(
+    stream: S,
+    server_name: &str,
+    callback: CertificateValidationCallback,
+) -> io::Result<(TlsStream<S>, x509_cert::Certificate)>
+where
+    S: Unpin + AsyncRead + AsyncWrite,
+{
+    upgrade_with_certificate_validation_callback_for_endpoint(stream, server_name, server_name, callback).await
+}
+
+/// Upgrades a stream with normal platform-root and server-name validation.
+///
+/// On validation failure, invokes `callback` with `endpoint` so callers can scope
+/// certificate exceptions to the configured connection endpoint.
+pub async fn upgrade_with_certificate_validation_callback_for_endpoint<S>(
+    stream: S,
+    server_name: &str,
+    endpoint: &str,
+    callback: CertificateValidationCallback,
+) -> io::Result<(TlsStream<S>, x509_cert::Certificate)>
+where
+    S: Unpin + AsyncRead + AsyncWrite,
+{
+    let config = crate::rustls_client_config(CertificateValidation::Strict, endpoint, Some(callback))?;
+    let domain = ServerName::try_from(server_name.to_owned()).map_err(io::Error::other)?;
+    let mut tls_stream = tokio_rustls::TlsConnector::from(Arc::new(config))
+        .connect(domain, stream)
+        .await?;
+    tls_stream.flush().await?;
+
+    let tls_cert = {
+        use x509_cert::der::Decode as _;
+
+        let cert = tls_stream
+            .get_ref()
+            .1
+            .peer_certificates()
+            .and_then(|certificates| certificates.first())
+            .ok_or_else(|| io::Error::other("peer certificate is missing"))?;
+
+        x509_cert::Certificate::from_der(cert).map_err(io::Error::other)?
+    };
+
+    Ok((tls_stream, tls_cert))
 }
 
 /// Report the TLS version and cipher suite negotiated for `stream`.
@@ -88,91 +112,5 @@ pub fn negotiated<S>(stream: &TlsStream<S>) -> crate::NegotiatedTls {
         cipher_suite: connection
             .negotiated_cipher_suite()
             .map(|suite| format!("{:?}", suite.suite())),
-    }
-}
-
-mod danger {
-    use std::io;
-    use std::sync::{Arc, Mutex};
-
-    use tokio_rustls::rustls::client::WebPkiServerVerifier;
-    use tokio_rustls::rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-    use tokio_rustls::rustls::crypto::{WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature};
-    use tokio_rustls::rustls::{DigitallySignedStruct, Error, SignatureScheme, pki_types};
-
-    #[derive(Debug)]
-    pub(super) struct RecordingCertificateVerifier {
-        inner: Option<Arc<WebPkiServerVerifier>>,
-        supported: WebPkiSupportedAlgorithms,
-        result: Arc<Mutex<Option<bool>>>,
-    }
-
-    impl RecordingCertificateVerifier {
-        pub(super) fn new(result: Arc<Mutex<Option<bool>>>, supported: WebPkiSupportedAlgorithms) -> io::Result<Self> {
-            let mut roots = tokio_rustls::rustls::RootCertStore::empty();
-            let native = rustls_native_certs::load_native_certs();
-            for certificate in native.certs {
-                let _ = roots.add(certificate);
-            }
-            // Some platforms expose no native roots. Callers must check the
-            // certificate fingerprint before accepting an untrusted session.
-            let inner = if roots.is_empty() {
-                None
-            } else {
-                Some(
-                    WebPkiServerVerifier::builder(Arc::new(roots))
-                        .build()
-                        .map_err(io::Error::other)?,
-                )
-            };
-            Ok(Self {
-                inner,
-                supported,
-                result,
-            })
-        }
-    }
-
-    impl ServerCertVerifier for RecordingCertificateVerifier {
-        fn verify_server_cert(
-            &self,
-            end_entity: &pki_types::CertificateDer<'_>,
-            intermediates: &[pki_types::CertificateDer<'_>],
-            server_name: &pki_types::ServerName<'_>,
-            ocsp_response: &[u8],
-            now: pki_types::UnixTime,
-        ) -> Result<ServerCertVerified, Error> {
-            let verified = self.inner.as_ref().is_some_and(|inner| {
-                inner
-                    .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
-                    .is_ok()
-            });
-            if let Ok(mut result) = self.result.lock() {
-                *result = Some(verified);
-            }
-            Ok(ServerCertVerified::assertion())
-        }
-
-        fn verify_tls12_signature(
-            &self,
-            message: &[u8],
-            cert: &pki_types::CertificateDer<'_>,
-            dss: &DigitallySignedStruct,
-        ) -> Result<HandshakeSignatureValid, Error> {
-            verify_tls12_signature(message, cert, dss, &self.supported)
-        }
-
-        fn verify_tls13_signature(
-            &self,
-            message: &[u8],
-            cert: &pki_types::CertificateDer<'_>,
-            dss: &DigitallySignedStruct,
-        ) -> Result<HandshakeSignatureValid, Error> {
-            verify_tls13_signature(message, cert, dss, &self.supported)
-        }
-
-        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-            self.supported.supported_schemes()
-        }
     }
 }

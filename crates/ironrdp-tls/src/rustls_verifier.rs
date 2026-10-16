@@ -96,7 +96,9 @@ impl ServerCertVerifier for NoRootsVerifier {
         _: &[u8],
         _: rustls::pki_types::UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        Err(rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer))
+        Err(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::UnknownIssuer,
+        ))
     }
 
     fn verify_tls12_signature(

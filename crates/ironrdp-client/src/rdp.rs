@@ -2077,10 +2077,15 @@ async fn connect_direct(
     rdpdr_factory: RdpdrFactoryRef<'_>,
     auto_reconnect_cookie: Option<&ServerAutoReconnect>,
 ) -> ConnectorResult<ConnectOutput> {
-    let dest = config.destination.to_string();
-    let stream = TcpStream::connect(&dest)
+    let dest = config.tcp_destination.as_ref().unwrap_or(&config.destination).to_string();
+    let mut stream = TcpStream::connect(&dest)
         .await
         .map_err(|e| ironrdp_connector::custom_err!("TCP connect", e))?;
+    if let Some(preamble) = config.tcp_preamble.as_deref() {
+        tokio::io::AsyncWriteExt::write_all(&mut stream, preamble)
+            .await
+            .map_err(|e| ironrdp_connector::custom_err!("TCP preamble", e))?;
+    }
     #[cfg(feature = "vmconnect")]
     let pcb_deadline = tokio::time::Instant::now() + ironrdp_vmconnect::PCB_TRANSMIT_DEADLINE;
     let client_addr = stream

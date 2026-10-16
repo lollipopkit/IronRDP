@@ -93,6 +93,8 @@ impl AudioQualityMode {
 pub struct Config {
     pub(crate) connector: ironrdp_connector::Config,
     pub(crate) destination: Destination,
+    pub(crate) tcp_destination: Option<Destination>,
+    pub(crate) tcp_preamble: Option<Vec<u8>>,
     pub(crate) transport: Transport,
     #[cfg(feature = "udp")]
     pub(crate) udp_transport_enabled: bool,
@@ -156,6 +158,11 @@ impl Config {
     /// Resolved RDP target (host + port).
     pub fn destination(&self) -> &Destination {
         &self.destination
+    }
+
+    /// TCP endpoint a direct connection dials instead of [`Self::destination`].
+    pub fn tcp_destination(&self) -> Option<&Destination> {
+        self.tcp_destination.as_ref()
     }
 
     /// Selected transport (Direct, Gateway, or RDCleanPath).
@@ -281,6 +288,8 @@ impl fmt::Debug for Config {
         let mut s = f.debug_struct("Config");
         s.field("connector", &self.connector);
         s.field("destination", &self.destination);
+        s.field("tcp_destination", &self.tcp_destination);
+        s.field("tcp_preamble", &self.tcp_preamble.as_ref().map(|_| "[redacted]"));
         s.field("transport", &self.transport);
         #[cfg(feature = "udp")]
         s.field("udp_transport_enabled", &self.udp_transport_enabled);
@@ -748,6 +757,8 @@ impl fmt::Display for MissingField {
 pub struct ConfigBuilder {
     // Required (no default).
     destination: Option<Destination>,
+    tcp_destination: Option<Destination>,
+    tcp_preamble: Option<Vec<u8>>,
     username: Option<String>,
     password: Option<String>,
     client_build: Option<u32>,
@@ -843,6 +854,23 @@ impl ConfigBuilder {
         self.properties.set_server_port(destination.port());
         self.properties.clear_alternate_full_address();
         self.destination = Some(destination);
+        self
+    }
+
+    /// Dials this TCP endpoint on a direct connection, keeping the destination as the TLS
+    /// server name, the CredSSP target and the certificate-validation endpoint: a local
+    /// tunnel to the destination, say.
+    #[must_use]
+    pub fn with_tcp_destination(mut self, destination: Destination) -> Self {
+        self.tcp_destination = Some(destination);
+        self
+    }
+
+    /// Writes these bytes on a direct connection's TCP stream before anything RDP, for a
+    /// tunnel that only carries a connection presenting them. Never logged.
+    #[must_use]
+    pub fn with_tcp_preamble(mut self, preamble: Vec<u8>) -> Self {
+        self.tcp_preamble = Some(preamble);
         self
     }
 
@@ -2019,6 +2047,8 @@ impl ConfigBuilder {
         Ok(Config {
             connector,
             destination: self.destination.context("server address is required")?,
+            tcp_destination: self.tcp_destination,
+            tcp_preamble: self.tcp_preamble,
             transport,
             #[cfg(feature = "udp")]
             udp_transport_enabled: self.udp_transport_enabled,

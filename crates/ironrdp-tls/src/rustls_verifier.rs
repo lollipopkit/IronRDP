@@ -44,9 +44,21 @@ fn server_cert_verifier(
 
     let verifier: Arc<dyn ServerCertVerifier> = match certificate_validation {
         CertificateValidation::Strict => {
-            rustls::client::WebPkiServerVerifier::builder(Arc::new(platform_root_certificates()?))
-                .build()
-                .map_err(io::Error::other)?
+            let roots = platform_root_certificates();
+            if roots.is_empty() {
+                // Some platforms (iOS, some Android builds) expose no roots to
+                // rustls-native-certs. No certificate is then trusted, and each
+                // one is left to the callback, if there is one.
+                Arc::new(NoRootsVerifier {
+                    algorithms: rustls::ClientConfig::builder()
+                        .crypto_provider()
+                        .signature_verification_algorithms,
+                })
+            } else {
+                rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
+                    .build()
+                    .map_err(io::Error::other)?
+            }
         }
         CertificateValidation::DangerouslyAcceptInvalidCertificate => Arc::new(NoCertificateVerification),
     };
@@ -61,17 +73,53 @@ fn server_cert_verifier(
     })
 }
 
-fn platform_root_certificates() -> io::Result<rustls::RootCertStore> {
+fn platform_root_certificates() -> rustls::RootCertStore {
     let native_certificates = rustls_native_certs::load_native_certs();
     let mut roots = rustls::RootCertStore::empty();
-    let (added, _) = roots.add_parsable_certificates(native_certificates.certs);
-    if added == 0 {
-        return Err(io::Error::other(
-            "the platform certificate store contains no usable roots",
-        ));
+    roots.add_parsable_certificates(native_certificates.certs);
+    roots
+}
+
+/// Strict validation with no trust roots: every certificate is untrusted, while
+/// handshake signatures are still checked against the presented certificate.
+#[derive(Debug)]
+struct NoRootsVerifier {
+    algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
+}
+
+impl ServerCertVerifier for NoRootsVerifier {
+    fn verify_server_cert(
+        &self,
+        _: &rustls::pki_types::CertificateDer<'_>,
+        _: &[rustls::pki_types::CertificateDer<'_>],
+        _: &ServerName<'_>,
+        _: &[u8],
+        _: rustls::pki_types::UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Err(rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer))
     }
 
-    Ok(roots)
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
 }
 
 struct CallbackVerifier {

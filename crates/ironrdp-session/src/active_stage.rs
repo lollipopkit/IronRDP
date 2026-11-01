@@ -16,6 +16,7 @@ use ironrdp_pdu::rdp::client_info::CompressionType;
 use ironrdp_pdu::rdp::headers::ShareDataPdu;
 use ironrdp_pdu::rdp::multitransport::{MultitransportRequestPdu, MultitransportResponsePdu};
 use ironrdp_pdu::rdp::refresh_rectangle::RefreshRectanglePdu;
+use ironrdp_pdu::rdp::server_error_info::ErrorInfo;
 use ironrdp_pdu::rdp::session_info::ServerAutoReconnect;
 use ironrdp_pdu::rdp::suppress_output::SuppressOutputPdu;
 use ironrdp_pdu::slow_path::{self, GraphicsUpdateType};
@@ -874,7 +875,7 @@ impl TryFrom<x224::ProcessorOutput> for ActiveStageOutput {
                         mcs::DisconnectReason::UserRequested => GracefulDisconnectReason::UserInitiated,
                         other => GracefulDisconnectReason::Other(other.description().to_owned()),
                     },
-                    x224::DisconnectDescription::ErrorInfo(info) => GracefulDisconnectReason::Other(info.description()),
+                    x224::DisconnectDescription::ErrorInfo(info) => GracefulDisconnectReason::ErrorInfo(info),
                 };
 
                 Ok(Self::Terminate(desc))
@@ -901,6 +902,8 @@ impl TryFrom<x224::ProcessorOutput> for ActiveStageOutput {
 pub enum GracefulDisconnectReason {
     UserInitiated,
     ServerInitiated,
+    /// The server's Set Error Info PDU, kept as a code so a client can say why in its own words.
+    ErrorInfo(ErrorInfo),
     Other(String),
 }
 
@@ -909,6 +912,7 @@ impl GracefulDisconnectReason {
         match self {
             GracefulDisconnectReason::UserInitiated => "user initiated disconnect".to_owned(),
             GracefulDisconnectReason::ServerInitiated => "server initiated disconnect".to_owned(),
+            GracefulDisconnectReason::ErrorInfo(info) => info.description(),
             GracefulDisconnectReason::Other(description) => description.clone(),
         }
     }
@@ -1590,6 +1594,26 @@ mod tests {
                 .messages()
                 .iter()
                 .all(|message| !message.encode_unframed_pdu().unwrap().is_empty())
+        );
+    }
+
+    #[test]
+    fn server_error_info_disconnect_keeps_its_code() {
+        use ironrdp_pdu::rdp::server_error_info::ProtocolIndependentCode;
+
+        let info = ErrorInfo::ProtocolIndependentCode(ProtocolIndependentCode::DisconnectedByOtherconnection);
+        let output = ActiveStageOutput::try_from(x224::ProcessorOutput::Disconnect(
+            x224::DisconnectDescription::ErrorInfo(info),
+        ))
+        .unwrap();
+
+        let ActiveStageOutput::Terminate(GracefulDisconnectReason::ErrorInfo(kept)) = output else {
+            panic!("expected an error info disconnect, got {output:?}");
+        };
+        assert_eq!(kept, info);
+        assert_eq!(
+            GracefulDisconnectReason::ErrorInfo(info).description(),
+            info.description()
         );
     }
 }

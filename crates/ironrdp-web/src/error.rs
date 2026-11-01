@@ -51,7 +51,9 @@ impl From<connector::ConnectorError> for IronError {
                 ..
             }) => IronErrorKind::LogonFailure,
             ConnectorErrorKind::AccessDenied => IronErrorKind::AccessDenied,
-            ConnectorErrorKind::Negotiation(_) => IronErrorKind::NegotiationFailure,
+            ConnectorErrorKind::Negotiation(_) | ConnectorErrorKind::SecurityProtocolMismatch { .. } => {
+                IronErrorKind::NegotiationFailure
+            }
             _ => IronErrorKind::General,
         };
 

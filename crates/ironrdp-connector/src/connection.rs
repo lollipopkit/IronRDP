@@ -1126,9 +1126,12 @@ impl Sequence for ClientConnector {
                     selected_protocol.intersects(requested_protocol)
                 };
                 if !protocol_ok {
-                    return Err(reason_err!(
+                    return Err(ConnectorError::new(
                         "Initiation",
-                        "client advertised {requested_protocol}, but server selected {selected_protocol}",
+                        ConnectorErrorKind::SecurityProtocolMismatch {
+                            requested: requested_protocol,
+                            selected: selected_protocol,
+                        },
                     ));
                 }
 
@@ -1643,7 +1646,10 @@ pub fn encode_send_data_request<T: Encode>(
     Ok(written)
 }
 
-#[allow(single_use_lifetimes, reason = "fires on the pinned toolchain, not on newer ones where anonymous lifetimes in `impl Trait` are stable")]
+#[allow(
+    single_use_lifetimes,
+    reason = "fires on the pinned toolchain, not on newer ones where anonymous lifetimes in `impl Trait` are stable"
+)]
 fn create_gcc_blocks<'a>(
     config: &Config,
     cluster_data: Option<&gcc::ClientClusterData>,

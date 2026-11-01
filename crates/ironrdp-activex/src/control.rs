@@ -838,7 +838,7 @@ fn trace_connection_failure(error: &ConnectorError) {
         ConnectorErrorKind::AccessDenied => "AccessDenied",
         ConnectorErrorKind::General => "General",
         ConnectorErrorKind::Custom => "Custom",
-        ConnectorErrorKind::Negotiation(_) => "Negotiation",
+        ConnectorErrorKind::Negotiation(_) | ConnectorErrorKind::SecurityProtocolMismatch { .. } => "Negotiation",
         _ => "Unknown",
     };
     let location = error.location();
@@ -973,7 +973,9 @@ impl DisconnectInfo {
             ConnectorErrorKind::Reason(_) => "The RDP connection ended with a protocol reason.",
             ConnectorErrorKind::AccessDenied => "The RDP server denied access.",
             ConnectorErrorKind::General | ConnectorErrorKind::Custom => "The RDP client encountered an internal error.",
-            ConnectorErrorKind::Negotiation(_) => "RDP security negotiation failed.",
+            ConnectorErrorKind::Negotiation(_) | ConnectorErrorKind::SecurityProtocolMismatch { .. } => {
+                "RDP security negotiation failed."
+            }
             _ => "The RDP client encountered an unknown error.",
         };
         Self {
@@ -1008,7 +1010,7 @@ impl DisconnectInfo {
                 description: "The RDP server ended the session.",
                 ..Self::no_info()
             },
-            GracefulDisconnectReason::Other(_) => Self {
+            GracefulDisconnectReason::ErrorInfo(_) | GracefulDisconnectReason::Other(_) => Self {
                 description: "The RDP session ended with an unclassified server reason.",
                 ..Self::no_info()
             },

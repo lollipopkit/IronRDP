@@ -441,6 +441,11 @@ pub enum ConnectorErrorKind {
     General,
     Custom,
     Negotiation(NegotiationFailure),
+    /// The server selected a security protocol the client did not advertise.
+    SecurityProtocolMismatch {
+        requested: ironrdp_pdu::nego::SecurityProtocol,
+        selected: ironrdp_pdu::nego::SecurityProtocol,
+    },
 }
 
 impl fmt::Display for ConnectorErrorKind {
@@ -454,6 +459,9 @@ impl fmt::Display for ConnectorErrorKind {
             ConnectorErrorKind::General => write!(f, "general error"),
             ConnectorErrorKind::Custom => write!(f, "custom error"),
             ConnectorErrorKind::Negotiation(failure) => write!(f, "negotiation failure: {failure}"),
+            ConnectorErrorKind::SecurityProtocolMismatch { requested, selected } => {
+                write!(f, "client advertised {requested}, but server selected {selected}")
+            }
         }
     }
 }
@@ -469,6 +477,7 @@ impl core::error::Error for ConnectorErrorKind {
             ConnectorErrorKind::Custom => None,
             ConnectorErrorKind::General => None,
             ConnectorErrorKind::Negotiation(failure) => Some(failure),
+            ConnectorErrorKind::SecurityProtocolMismatch { .. } => None,
         }
     }
 }
